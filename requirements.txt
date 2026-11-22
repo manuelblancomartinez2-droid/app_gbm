@@ -1,0 +1,8 @@
+# Monte Carlo GBM multiactivo — motor_gbm.py + app_gbm.py
+# Probado con: numpy 2.5.3 · pandas 3.0.5 · scipy 1.18.1 · yfinance 1.8.0 · streamlit 1.67.0 · plotly 7.1.0
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+yfinance>=0.2.40
+streamlit>=1.50      # width="stretch" en los gráficos/tablas
+plotly>=5.20
