@@ -1,22 +1,22 @@
-#streamlit run app_gbm.py
 """
-Monte Carlo GBM multiactivo — Dashboard
-Ejecutar:  streamlit run mc_dashboard.py
+app_gbm.py — Interfaz (Streamlit + Plotly). La matemática vive en motor_gbm.py
+Ejecutar:  streamlit run app_gbm.py
 Requisitos: pip install streamlit plotly yfinance scipy numpy pandas
 """
 import math
- 
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import scipy.stats as stats
 import streamlit as st
-import yfinance as yf
 from plotly.subplots import make_subplots
- 
+
+import motor_gbm
+from motor_gbm import BONOS13W, STEPS, T
+
 st.set_page_config(page_title="Monte Carlo · GBM multiactivo", page_icon="◆",
                    layout="wide", initial_sidebar_state="expanded")
- 
+
 # ════════════════════════════════════════════════════════════════════════
 # Estilo
 # ════════════════════════════════════════════════════════════════════════
@@ -27,13 +27,13 @@ C_BS = "#A78BFA"                            # Black-Scholes
 C_POS, C_NEG = "#22C55E", "#EF4444"
 PALETA = ["#4F8CFF", "#A78BFA", "#22D3EE", "#34D399", "#F5A524",
           "#F472B6", "#FB7185", "#FACC15"]
- 
- 
+
+
 def rgba(h, a):
     h = h.lstrip("#")
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
- 
- 
+
+
 st.markdown(f"""<style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 html, body, [class*="css"], .stApp {{ font-family:'Inter',sans-serif; }}
@@ -62,8 +62,8 @@ p, label, span, div {{ color:inherit; }}
 div[data-testid="stDataFrame"] {{ border:1px solid {BORDER}; border-radius:10px; }}
 .katex {{ color:{TXT}; font-size:1.0em; }}
 </style>""", unsafe_allow_html=True)
- 
- 
+
+
 def estilo(fig, h=420, legend=True, top=36):
     fig.update_layout(
         template="plotly_dark", height=h,
@@ -79,103 +79,21 @@ def estilo(fig, h=420, legend=True, top=36):
     fig.update_yaxes(gridcolor=GRID, zeroline=False, linecolor=BORDER, tickfont=dict(color=MUTED))
     fig.update_annotations(font=dict(color=MUTED, size=12))
     return fig
- 
- 
+
+
 def sec(t):
     st.markdown(f'<div class="sec">{t}</div>', unsafe_allow_html=True)
- 
- 
+
+
+
 # ════════════════════════════════════════════════════════════════════════
-# Motor de cálculo — idéntico al script original
+# Puente con el motor (caché 1 h en memoria, sin copiar los arrays)
 # ════════════════════════════════════════════════════════════════════════
-STEPS = 252          # 1 año en días hábiles
-T = 1.0
-BONOS13W = "^IRX"
- 
- 
-def gbm(So, sigma, L, n_sims, steps, T, r, nu=None):
-    dt = T / steps
-    n_activos = len(So)
- 
-    rng = np.random.default_rng(42)
-    if nu is None:
-        Z = rng.standard_normal(size=(n_sims, steps, n_activos))
-    else:
-        Z = rng.standard_t(df=nu, size=(n_sims, steps, n_activos)) / np.sqrt(nu / (nu - 2))
- 
-    W = Z @ L.T
- 
-    # Ecuación exacta del GBM en log-retornos
-    log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * W
-    acumulados = np.cumsum(log_returns, axis=1)
- 
-    # Añadir instante inicial t = 0
-    zeros = np.zeros((n_sims, 1, n_activos))
-    F = np.concatenate([zeros, acumulados], axis=1)
-    return So * np.exp(F)
- 
- 
-def black_scholes_call(S0, K, r, sigma, T):
-    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    return S0 * stats.norm.cdf(d1) - K * np.exp(-r * T) * stats.norm.cdf(d2)
- 
- 
-@st.cache_data(ttl=3600, show_spinner=False)
-def descargar(tickers: tuple):
-    Close = yf.download(list(tickers), period="1y", progress=False)["Close"]
-    # yfinance devuelve las columnas en orden alfabético: se reordenan
-    # para que cada resultado corresponda al ticker correcto.
-    Close = Close[list(tickers)].dropna()
-    r = yf.Ticker(BONOS13W).history(period="5d")["Close"].iloc[-1] / 100
-    return Close, float(r)
- 
- 
-@st.cache_resource(show_spinner=False, max_entries=2)
+@st.cache_resource(show_spinner=False, max_entries=2, ttl=3600)
 def motor(tickers: tuple, N_sims: int, nu: int):
-    Close, r = descargar(tickers)
-    steps = STEPS
- 
-    So = Close.iloc[-1].to_numpy()
-    retornosLog = np.diff(np.log(Close.to_numpy()), axis=0)
-    sigma = retornosLog.std(axis=0, ddof=1) * np.sqrt(steps)
- 
-    corr = np.corrcoef(retornosLog, rowvar=False)
-    L = np.linalg.cholesky(corr)
- 
-    precios = gbm(So, sigma, L, N_sims, steps, T, r)
-    precios_t = gbm(So, sigma, L, N_sims, steps, T, r, nu=nu)
- 
-    martingala = precios[:, -1, :].mean(axis=0) * np.exp(-r * T)
-    errores = np.abs(martingala - So) / So * 100
- 
-    media = np.mean(precios, axis=0)
-    Mediana = np.percentile(precios, 50, axis=0)
-    p5, p25, p75, p95 = np.percentile(precios, [5, 25, 75, 95], axis=0)
- 
-    S_T_norm = precios[:, -1, :]
-    S_T_stud = precios_t[:, -1, :]
-    perdidas_norm = So - S_T_norm
-    perdidas_stud = So - S_T_stud
- 
-    var95 = np.percentile(perdidas_norm, 95, axis=0)
-    Cvar = np.array([perdidas_norm[perdidas_norm[:, i] >= var95[i], i].mean() for i in range(len(So))])
-    var95_t = np.percentile(perdidas_stud, 95, axis=0)
-    Cvar_t = np.array([perdidas_stud[perdidas_stud[:, i] >= var95_t[i], i].mean() for i in range(len(So))])
- 
-    K = So
-    bs_call = black_scholes_call(So, K, r, sigma, T)
-    mc_call_norm = (np.exp(-r * T) * np.maximum(S_T_norm - K, 0)).mean(axis=0)
-    mc_call_stud = (np.exp(-r * T) * np.maximum(S_T_stud - K, 0)).mean(axis=0)
- 
-    return dict(Close=Close, r=r, So=So, retornosLog=retornosLog, sigma=sigma, corr=corr, L=L,
-                precios=precios, precios_t=precios_t, martingala=martingala, errores=errores,
-                media=media, Mediana=Mediana, p5=p5, p25=p25, p75=p75, p95=p95,
-                perdidas_norm=perdidas_norm, perdidas_stud=perdidas_stud,
-                var95=var95, Cvar=Cvar, var95_t=var95_t, Cvar_t=Cvar_t,
-                bs_call=bs_call, mc_call_norm=mc_call_norm, mc_call_stud=mc_call_stud)
- 
- 
+    return motor_gbm.simular(tickers, N_sims, nu)
+
+
 # ════════════════════════════════════════════════════════════════════════
 # Gráficos
 # ════════════════════════════════════════════════════════════════════════
@@ -195,8 +113,8 @@ def cono(fig, R, i, color, row=None, col=None, legend=True):
                              name="Mediana", **g), **kw)
     fig.add_trace(go.Scatter(x=x, y=R["media"][:, i], line=dict(color=TXT, width=1.2, dash="dot"),
                              name="Media", **g), **kw)
- 
- 
+
+
 @st.cache_resource(show_spinner=False, max_entries=16)
 def fig_animacion(tickers, N_sims, nu, i, n_paths=80, stride=4, n_bins=70):
     R = motor(tickers, N_sims, nu)
@@ -204,23 +122,23 @@ def fig_animacion(tickers, N_sims, nu, i, n_paths=80, stride=4, n_bins=70):
     steps = P.shape[1] - 1
     So = R["So"][i]
     color = PALETA[i % len(PALETA)]
- 
+
     lo = min(np.percentile(P[:, -1], .5), np.percentile(Pt[:, -1], .5))
     hi = max(np.percentile(P[:, -1], 99.5), np.percentile(Pt[:, -1], 99.5))
     pad = (hi - lo) * .04
     bins = np.linspace(lo - pad, hi + pad, n_bins + 1)
     centros, ancho = (bins[:-1] + bins[1:]) / 2, bins[1] - bins[0]
- 
+
     def dens(x):
         c, _ = np.histogram(x, bins=bins)
         return c / len(x)
- 
+
     idx = list(range(0, steps + 1, stride))
     if idx[-1] != steps:
         idx.append(steps)
     muestra = P[:n_paths]
     q = {k: R[k][:, i] for k in ("p5", "p25", "p75", "p95", "Mediana", "media")}
- 
+
     def datos(k):
         x = np.arange(k + 1)
         xp = np.tile(np.append(x, np.nan), n_paths)
@@ -230,7 +148,7 @@ def fig_animacion(tickers, N_sims, nu, i, n_paths=80, stride=4, n_bins=70):
                 go.Scatter(x=x, y=q["p25"][:k + 1]), go.Scatter(x=x, y=q["Mediana"][:k + 1]),
                 go.Scatter(x=x, y=q["media"][:k + 1]),
                 go.Bar(x=dens(P[:, k]), y=centros), go.Scatter(x=dens(Pt[:, k]), y=centros)]
- 
+
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[.74, .26],
                         horizontal_spacing=.035)
     d = datos(steps)
@@ -252,11 +170,11 @@ def fig_animacion(tickers, N_sims, nu, i, n_paths=80, stride=4, n_bins=70):
     for j, (tr, s) in enumerate(zip(d, estilos)):
         tr.update(**s)
         fig.add_trace(tr, row=1, col=1 if j < 7 else 2)
- 
+
     frames = [go.Frame(data=datos(k), traces=list(range(9)), name=str(k)) for k in idx]
     fig.frames = frames
     xmax = max(max(dens(P[:, k]).max(), dens(Pt[:, k]).max()) for k in idx if k >= steps * .25) * 1.12
- 
+
     fig.add_hline(y=So, line=dict(color=MUTED, width=1, dash="dash"), row=1, col=2)
     fig.add_hline(y=So, line=dict(color=MUTED, width=1, dash="dash"), row=1, col=1,
                   annotation_text=f"S₀ {So:,.2f}", annotation_position="top left",
@@ -290,8 +208,8 @@ def fig_animacion(tickers, N_sims, nu, i, n_paths=80, stride=4, n_bins=70):
                                              transition=dict(duration=0))]) for k in idx])],
     )
     return fig
- 
- 
+
+
 def hist_overlay(a, b, nombre_a, nombre_b, n_bins=80, clip=(.1, 99.9)):
     lo = min(np.percentile(a, clip[0]), np.percentile(b, clip[0]))
     hi = max(np.percentile(a, clip[1]), np.percentile(b, clip[1]))
@@ -309,15 +227,15 @@ def hist_overlay(a, b, nombre_a, nombre_b, n_bins=80, clip=(.1, 99.9)):
     fig.update_layout(barmode="overlay", bargap=0)
     fig.update_yaxes(tickformat=".1%")
     return fig
- 
- 
+
+
 def vline(fig, x, color, texto, dash="solid", nivel=0):
     fig.add_vline(x=x, line=dict(color=color, width=1.4, dash=dash),
                   annotation_text=texto, annotation_position="top right",
                   annotation=dict(yshift=-16 * nivel),
                   annotation_font=dict(color=color, size=11))
- 
- 
+
+
 # ════════════════════════════════════════════════════════════════════════
 # Sidebar
 # ════════════════════════════════════════════════════════════════════════
@@ -331,12 +249,12 @@ with st.sidebar:
     st.markdown(f"""<div style="color:{MUTED};font-size:.78rem;line-height:1.6;margin-top:.6rem">
     Histórico: 1 año diario (yfinance)<br>Pasos: {STEPS} · T = {T:.0f} año · seed = 42<br>
     Tipo libre de riesgo: {BONOS13W}<br>Strike: K = S₀ (ATM)</div>""", unsafe_allow_html=True)
- 
+
 TICKERS = tuple(dict.fromkeys(t.strip().upper() for t in txt.split(",") if t.strip()))
 if len(TICKERS) < 2:
     st.error("Introduce al menos 2 tickers (la matriz de correlación/Cholesky lo requiere).")
     st.stop()
- 
+
 try:
     with st.spinner(f"Descargando datos y simulando {N_sims:,} × {STEPS} × {len(TICKERS)}…"):
         R = motor(TICKERS, N_sims, nu)
@@ -346,11 +264,11 @@ except KeyError as e:
 except np.linalg.LinAlgError:
     st.error("La matriz de correlación no es definida positiva (¿tickers duplicados o colineales?).")
     st.stop()
- 
+
 n = len(TICKERS)
 So, r, sigma = R["So"], R["r"], R["sigma"]
 COL = {t: PALETA[k % len(PALETA)] for k, t in enumerate(TICKERS)}
- 
+
 # ════════════════════════════════════════════════════════════════════════
 # Cabecera
 # ════════════════════════════════════════════════════════════════════════
@@ -360,7 +278,7 @@ st.markdown(f"""<div class="hdr"><div>
 <div class="hdr-sub">Normal vs t-Student · VaR / CVaR · Black-Scholes vs Monte Carlo · Validación martingala</div>
 </div><span class="badge">último cierre {pd.Timestamp(ult).strftime('%d %b %Y')}</span></div>""",
             unsafe_allow_html=True)
- 
+
 kpis = [("Tipo libre de riesgo", f"{r:.3%}", "^IRX · 13 semanas"),
         ("Simulaciones", f"{N_sims:,}", f"{STEPS} pasos · dt = 1/{STEPS}"),
         ("Horizonte", f"{T:.0f} año", "T"),
@@ -370,10 +288,10 @@ kpis = [("Tipo libre de riesgo", f"{r:.3%}", "^IRX · 13 semanas"),
 st.markdown('<div class="kpi-grid">' + "".join(
     f'<div class="kpi"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>'
     for l, v, s in kpis) + "</div>", unsafe_allow_html=True)
- 
+
 tabs = st.tabs(["Resumen", "Evolución temporal", "Riesgo · VaR / CVaR", "Opciones",
                 "Correlación", "Validación martingala"])
- 
+
 # ── Resumen ─────────────────────────────────────────────────────────────
 with tabs[0]:
     sec("Resultados por activo")
@@ -390,7 +308,7 @@ with tabs[0]:
     cfg["σ anual"] = st.column_config.NumberColumn(format="%.2f%%")
     cfg["Err. martingala"] = st.column_config.NumberColumn(format="%.3f%%")
     st.dataframe(df, hide_index=True, width="stretch", column_config=cfg)
- 
+
     sec("Conos de percentiles · GBM Normal")
     cols = min(3, n)
     rows = math.ceil(n / cols)
@@ -402,17 +320,17 @@ with tabs[0]:
         fig.add_hline(y=So[k], line=dict(color=MUTED, width=1, dash="dash"), row=rr, col=cc)
     estilo(fig, h=300 * rows, top=60)
     st.plotly_chart(fig, width="stretch")
- 
+
 # ── Evolución temporal ──────────────────────────────────────────────────
 with tabs[1]:
     activo = st.radio("Activo", TICKERS, horizontal=True, key="act_evo")
     i = TICKERS.index(activo)
- 
+
     sec("Reproducción de la simulación")
     st.caption("Trayectorias y cono crecen día a día; a la derecha, la distribución transversal "
                "de S_t (Normal vs t-Student) en ese instante.")
     st.plotly_chart(fig_animacion(TICKERS, N_sims, nu, i), width="stretch")
- 
+
     sec("Instantánea en un día concreto")
     t = st.slider("Día hábil", 0, STEPS, STEPS // 2, key="t_snap")
     m = [("Media", R["media"][t, i]), ("Mediana", R["Mediana"][t, i]),
@@ -432,7 +350,7 @@ with tabs[1]:
         vline(fig, R["p95"][t, i], C_POS, "P95", "dot", 1)
         fig.update_xaxes(title_text=f"S_t · día {t}")
         st.plotly_chart(estilo(fig, h=380), width="stretch")
- 
+
 # ── Riesgo ──────────────────────────────────────────────────────────────
 with tabs[2]:
     st.latex(r"L = S_0 - S_T,\qquad \mathrm{VaR}_{95} = Q_{0.95}(L),\qquad "
@@ -440,7 +358,7 @@ with tabs[2]:
     pct = st.toggle("Expresar en % de S₀", value=True)
     esc = 100 / So if pct else np.ones(n)
     unidad = "%" if pct else "$"
- 
+
     sec("VaR y CVaR al 95% · Normal vs t-Student")
     fig = go.Figure()
     for nom, v, c in (("VaR Normal", R["var95"], C_N), ("CVaR Normal", R["Cvar"], rgba(C_N, .45)),
@@ -452,7 +370,7 @@ with tabs[2]:
     fig.update_layout(barmode="group", bargap=.25, bargroupgap=.06)
     fig.update_yaxes(title_text=f"Pérdida ({unidad})")
     st.plotly_chart(estilo(fig, h=400), width="stretch")
- 
+
     sec("Distribución de pérdidas a vencimiento")
     activo = st.radio("Activo", TICKERS, horizontal=True, key="act_risk")
     i = TICKERS.index(activo)
@@ -464,7 +382,7 @@ with tabs[2]:
     fig.update_xaxes(title_text="Pérdida L = S₀ − S_T ($)")
     st.plotly_chart(estilo(fig, h=380), width="stretch")
     st.caption("Eje recortado a los percentiles 0.1–99.9 para legibilidad; VaR/CVaR calculados sobre la muestra completa.")
- 
+
 # ── Opciones ────────────────────────────────────────────────────────────
 with tabs[3]:
     st.latex(r"C_{BS} = S_0\,N(d_1) - K e^{-rT} N(d_2),\qquad "
@@ -480,7 +398,7 @@ with tabs[3]:
     fig.update_layout(barmode="group", bargap=.25, bargroupgap=.06)
     fig.update_yaxes(title_text="Prima ($)")
     st.plotly_chart(estilo(fig, h=400), width="stretch")
- 
+
     sec("Detalle")
     dfo = pd.DataFrame({
         "Activo": TICKERS, "S₀ = K": So, "σ": sigma * 100,
@@ -494,7 +412,7 @@ with tabs[3]:
     for c in ("Δ MC N vs BS", "Δ MC t vs BS"):
         cfg[c] = st.column_config.NumberColumn(format="%+.3f%%")
     st.dataframe(dfo, hide_index=True, width="stretch", column_config=cfg)
- 
+
 # ── Correlación ─────────────────────────────────────────────────────────
 with tabs[4]:
     st.latex(r"\rho = \mathrm{corr}(\ln S_t - \ln S_{t-1}),\qquad \rho = LL^{\top},\qquad "
@@ -520,14 +438,14 @@ with tabs[4]:
                                    colorbar=dict(thickness=10, tickfont=dict(color=MUTED))))
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(estilo(fig, h=420, legend=False), width="stretch")
- 
+
     sec("Volatilidad anualizada histórica")
     fig = go.Figure(go.Bar(x=TICKERS, y=sigma * 100, marker_color=[COL[t] for t in TICKERS],
                            text=[f"{s:.1%}" for s in sigma], textposition="outside",
                            textfont=dict(color=MUTED), hovertemplate="%{x}: %{y:.2f}%<extra></extra>"))
     fig.update_yaxes(title_text="σ (%)")
     st.plotly_chart(estilo(fig, h=320, legend=False), width="stretch")
- 
+
 # ── Validación martingala ───────────────────────────────────────────────
 with tabs[5]:
     st.latex(r"e^{-rT}\,\mathbb{E}^{\mathbb{Q}}[S_T] = S_0 \quad\Rightarrow\quad "
